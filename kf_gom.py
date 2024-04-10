@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.api import VAR
 
+# Vector Autoregression (VAR) model for full-body GOM - One-shot learning
+
 variables =  ['Spine_Xrotation','Spine_Yrotation','Spine_Zrotation','Spine1_Xrotation','Spine1_Yrotation','Spine1_Zrotation','Spine2_Xrotation','Spine2_Yrotation','Spine2_Zrotation',
            'Spine3_Xrotation','Spine3_Yrotation','Spine3_Zrotation','Hips_Xrotation','Hips_Yrotation','Hips_Zrotation','Neck_Xrotation','Neck_Yrotation','Neck_Zrotation',
            'Head_Xrotation','Head_Yrotation','Head_Zrotation','LeftArm_Xrotation','LeftArm_Yrotation','LeftArm_Zrotation',
@@ -22,6 +24,7 @@ variables_2 = [sub + '(t-2)' for sub in variables]
 
 coef_labels_kf = np.concatenate((['Bias'], variables_1,variables_2))
 
+# Create a class for the Kalman Filter GOM model
 class KfGom:
     def __init__(self, variables, coef_labels_kf):
         self.variables = variables
@@ -32,7 +35,7 @@ class KfGom:
         self.df_pred = None
         self.df_y = None
         self.lags = 2
-
+    # Function to predict with the given coefficients
     def pred_ang_coef(self, dat_mod, coef_mod):
         df = dat_mod[self.variables] 
         # Create a DataFrame of lagged values for all variables
@@ -57,10 +60,17 @@ class KfGom:
 
         df_p_mod = predicted_values.dropna()
 
-        return df_p_mod
+        return df_p_mod # Return the predicted values as dataframes
 
     def do_gom(self, eulerAngles):
-        df = eulerAngles[self.variables]  #DATAFRAME WITH ANGLES   
+        df = eulerAngles[self.variables]  # Dataframe with angles
+        
+        constant_columns = [col for col in df.columns if df[col].nunique() <= 1]
+        
+        # VAR does not run if there are constant columns, so we add a small amount of noise to them
+        for col in constant_columns:
+            df[col] += np.random.normal(0, 0.001, size=len(df))
+
         self.model = VAR(df.values).fit(2)
         coef = self.model.params
 
@@ -91,4 +101,4 @@ class KfGom:
         self.df_pred = predicted_values.dropna().iloc[:-1,:]
         self.df_y = df.iloc[2:-1,:]
 
-        return self.coef, self.df_pred
+        return self.coef, self.df_pred # Return the coefficients and predicted values as dataframes

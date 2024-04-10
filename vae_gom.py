@@ -5,8 +5,10 @@ import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 
-vae_encoder = keras.models.load_model("ALL_Model_VAE_ENC_ALLCOEFt")
-vae_decoder = keras.models.load_model("ALL_Model_VAE_DEC_ALLCOEFt")
+# Variational Autoencoder (VAE) for full-body GOM - Use trained network
+
+vae_encoder = keras.models.load_model("ALL_Model_VAE_ENC_ALLCOEFt") # Load the encoder model (need gpu to run, if not we need to export the model with cpu)
+vae_decoder = keras.models.load_model("ALL_Model_VAE_DEC_ALLCOEFt") # Load the decoder model (need gpu to run, if not we need to export the model with cpu)
 
 variables =  ['Spine_Xrotation','Spine_Yrotation','Spine_Zrotation','Spine1_Xrotation','Spine1_Yrotation','Spine1_Zrotation','Spine2_Xrotation','Spine2_Yrotation','Spine2_Zrotation',
            'Spine3_Xrotation','Spine3_Yrotation','Spine3_Zrotation','Hips_Xrotation','Hips_Yrotation','Hips_Zrotation','Neck_Xrotation','Neck_Yrotation','Neck_Zrotation',
@@ -44,6 +46,7 @@ for j in varSub:
     v = [ j +'_'+ sub for sub in coef_labels]
     varCoef = varCoef+ v
 
+# Create a class for the Variational Autoencoder GOM model
 class VaeGom:
     def __init__(self, variables, varCoef, vae_encoder, vae_decoder):
         self.variables = variables
@@ -56,6 +59,7 @@ class VaeGom:
         self.df_pred = None
         self.df_yT = None
 
+    # This is the product of the coefficients and the input data
     def hadamard_product(self, x):
         coeff = keras.backend.expand_dims(x[0], axis=0)
         inp = keras.backend.expand_dims(x[1], axis=1)
@@ -64,6 +68,7 @@ class VaeGom:
         y = keras.backend.expand_dims(m2, axis=-2)
         return y
 
+    # Function to predict with the given coefficients
     def pred_ang_coef(self, dat_mod, coef_mod):
         val = dat_mod[self.variables].values  
         ned = self.scaler.transform(val)
@@ -98,14 +103,17 @@ class VaeGom:
         offset = df_yT.iloc[0,:] - df_y.iloc[0,:]
         df_p_mod = df_p_mod - offset
 
-        return df_p_mod
+        return df_p_mod # Return the predicted values as dataframes
 
+    # Function to obtain time-varing coefficients and predicted values
     def do_gom(self, eulerAngles):
-        val = eulerAngles[self.variables].values  #DATAFRAME WITH ANGLES   
+        val = eulerAngles[self.variables].values  # Dataframe with angles  
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
         self.scaler = self.scaler.fit(val)
         ned = self.scaler.transform(val)
-            
+        
+        # The data feed to the network is a 3-step window (dataX: 3x57) and predicts the next step (d1_pred: 1x57)
+        # The network gives the coefficients of the full-body GOM model 57x3x57
         wx = []
         for w in np.arange(0,len(val)-3, 1):
             wx.append(np.arange(0+w,3+w))
@@ -141,7 +149,7 @@ class VaeGom:
             c_vae = pd.DataFrame(rc2[np.newaxis,:], columns=self.varCoef)
             coef_mat_vae = pd.concat([coef_mat_vae, c_vae], axis = 0) 
 
-        return coef_mat_vae, self.df_pred
+        return coef_mat_vae, self.df_pred # Return the coefficients and predicted values as dataframes
     
 
     

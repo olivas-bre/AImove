@@ -1,4 +1,3 @@
-#%%
 import numpy as np
 import pandas as pd
 import panel as pn
@@ -12,15 +11,15 @@ from ae_gom import *
 from t_gom import *
 from kf_gom import *
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, PointDrawTool, BoxSelectTool, LassoSelectTool, LegendItem, Legend
+from bokeh.models import ColumnDataSource, PointDrawTool, BoxSelectTool, LassoSelectTool
 from io import StringIO
 import param
-import random
 
 import warnings
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
-pn.extension('plotly', 'tabulator', template='material', global_css=[':root { --design-primary-color: #005f9f; --design-background-color: #005f9f; --design-surface-color: #005f9f;}'])
+pn.extension('plotly', 'tabulator', template='material', raw_css=[':root { --design-primary-color: #005f9f; --design-background-color: #005f9f; --design-surface-color: #005f9f;}'])
+
 
 pn.config.raw_css = [
     '.title {color: #666666 !important; font-family: "Segoe UI", sans-serif; font-weight: bold !important; font-size: large !important;}',
@@ -35,41 +34,48 @@ offset_time = 5
 dat_inPred = 0
 width_A_buttons = 150
 
-vae_gom = VaeGom(variables, varCoef, vae_encoder, vae_decoder)
-ae_gom = AeGom(variables, varCoef, modelAE)
-t_gom = TGom(variables, varCoef, model_T)
-kf_gom = KfGom(variables, coef_labels_kf)
+
+# Initialize the approaches for human motion analysis
+vae_gom = VaeGom(variables, varCoef, vae_encoder, vae_decoder) # VAE-RGOM: Variational Autoencoder 
+ae_gom = AeGom(variables, varCoef, modelAE) # ATT-RGOM: Autoencoder with Attention Mechanism
+t_gom = TGom(variables, varCoef, model_T) # T-RGOM: Transformer
+kf_gom = KfGom(variables, coef_labels_kf) # KF-GOM: Vector Autoregressive Model - Kalman Filter
 
 #%%
+
 # Load initial file
 file = 'S4P07R1'
-path='bvh2/'+file+'.bvh'
+path='bvh2/'+file+'.bvh' # Path to the BVH file. All files from the list are in the folder 'bvh2'
+
+# Load the BVH file with Pymo:
 parser = BVHParser()
 parsed_data = parser.parse(path)
 mp = MocapParameterizer('position')
 
-positions = mp.fit_transform([parsed_data])
-jointA = variables[0]
-mocap_data = parsed_data.values.reset_index().iloc[:,1:]
+file_name = file+'.bvh' # Name of the file
+positions = mp.fit_transform([parsed_data]) # Get the position data
+jointA = variables[0] # Select the first joint angle to plot
+mocap_data = parsed_data.values.reset_index().iloc[:,1:] # Get the data from the BVH file
 
-rot_cols = [col for col in mocap_data.columns if 'rotation' in col]
-eulerAngles = mocap_data[rot_cols]
+rot_cols = [col for col in mocap_data.columns if 'rotation' in col] # Get the rotation (joint angles) columns as there are other columns with local position data
+eulerAngles = mocap_data[rot_cols] # Get the joint angles data 
 
-jpos = positions[0].values.iloc[1:,:].reset_index(drop=True)
-joints_to_draw = list(positions[0].skeleton.keys())
+jpos = positions[0].values.iloc[1:,:].reset_index(drop=True) # Get the global joint positions data
+joints_to_draw = list(positions[0].skeleton.keys()) # Get the list of joints to draw the stick figure
 
-GOM_df = pd.DataFrame(index=joints_to_draw, columns=joints_to_draw)
+GOM_df = pd.DataFrame(index=joints_to_draw, columns=joints_to_draw) # Create a DataFrame to store the colors of the joints when dexerity analysis is selected
 
-GOM_Skel = False
+GOM_Skel = False # Variable to indicate if the dexterity analysis is selected
 
-df_joints = pd.DataFrame({'Joint Angles': variables})
+df_joints = pd.DataFrame({'Joint Angles': variables}) # Create a DataFrame to store the joint angles to select
 
-data_marker_changes = {}
+data_marker_changes = {} # Dictionary to store the changes in the joint angles
 
-eulerAngles_GOM = []
-eulerAngles_original = eulerAngles.copy()
-compare = False
-nosynergy = ['Spine','Spine1','Spine2','Spine3','Hips','Neck','Head']
+eulerAngles_GOM = [] # List to store the joint angles for the dexterity analysis (excludes fingers and toes)
+eulerAngles_original = eulerAngles.copy() # Copy of the original joint angles data
+compare = False # Variable to indicate if a comparison is selected
+
+nosynergy = ['Spine','Spine1','Spine2','Spine3','Hips','Neck','Head']  # Joints that do not have the synergy assumption
 
 # Fill the DataFrame with colors based on the conditions
 for col in GOM_df.columns:
@@ -82,22 +88,28 @@ for col in GOM_df.columns:
             GOM_df.loc[idx, col] = 'darkgreen'  # Serial Joint
         else:
             GOM_df.loc[idx, col] = 'midnightblue'  # Non-Serial Joint
+        
 
-
+# Objects of the sliders that are shown to modify the constant coefficients in the KF-GOM approach
 class KF_Variable(param.Parameterized):
-    value = param.Number(default=0, bounds=(-20, 20), step=0.01)
-    reset_action = param.Action(lambda x: x.param.trigger('reset'), label='Reset')
+    value = param.Number(default=0, bounds=(-20, 20), step=0.01) # Slider to modify the constant coefficient
+    reset_action = param.Action(lambda x: x.param.trigger('reset'), label='Reset') # Button to reset the slider
 
-    def __init__(self, coef=0, **params):
+    def __init__(self, coef=0, bounds=(-20, 20), **params): # Initialize the slider with the coefficient and bounds
         super().__init__(**params)
+        self.param['value'].bounds = bounds
         self.value = coef
         self.coef = coef
-        self.reset_button = pn.widgets.Button(name='Reset', width=60)  # Create a button with width 100
+        self.reset_button = pn.widgets.Button(name='Reset', width=60)  # Button to reset the slider
         self.reset_button.on_click(self._reset)  # Link the button to the reset action
 
     def _reset(self, event=None):
         self.value = self.coef
 
+# Function to draw the stick figure in 3D using Plotly. Requires the obtained position data from the BVH file (positions[0]), 
+# the frame to draw, the camera position, the joints to draw (not used), the option to draw the names of the joints (not used), 
+# the joint to highlight (selected joint), the option to draw joints accoriding to the dexterity analysis, 
+# and the option if the plot is for comparison
 def draw_stickfigure3d_js(mocap_track, frame, cam=None, joints=None, draw_names=False, highlight_joint = None, GOM_Skel=False, compare = False):
     global offset_time
     frame = frame + offset_time
@@ -141,7 +153,7 @@ def draw_stickfigure3d_js(mocap_track, frame, cam=None, joints=None, draw_names=
         parent_y = df['%s_Zposition'%joint][frame]-ref_y
         parent_z = df['%s_Yposition'%joint][frame]-ref_z + df['RightFootToe_Yposition'][0]
  
-         
+        # Color the joints according to the dexterity analysis if true
         if not GOM_Skel:
             fig.add_trace(go.Scatter3d(
                 x=[parent_x],
@@ -171,7 +183,7 @@ def draw_stickfigure3d_js(mocap_track, frame, cam=None, joints=None, draw_names=
                 marker=dict(
                     size=6 if joint == highlight_joint else 3,
                     opacity=0.6,
-                    color=GOM_df.loc[highlight_joint, joint]),
+                    color=GOM_df.loc[highlight_joint, joint]), # Color the joint according to GOM_df
                 marker_line=dict(width=2, color='black'),
                 showlegend=False,
                 text= [joint],
@@ -395,12 +407,15 @@ def draw_stickfigure3d_js(mocap_track, frame, cam=None, joints=None, draw_names=
 
 #%%
 
+# Variables to store the loaded files and models, to avoid loading them again
 file_loaded = ''
 model_loaded = ''
 
+# Initial code to show the animation card and have ready the plots for the joint angles
 i_angle = joints_to_draw[0]
-# Select interval
 dff_3d = eulerAngles[[i_angle+'_Xrotation', i_angle+'_Yrotation', i_angle+'_Zrotation']]
+
+# 2D plots
 fig2Dx = go.Figure([
     go.Scatter(
         name=dff_3d.columns[0],
@@ -455,12 +470,91 @@ figA_pane = pn.pane.Plotly(figA)
 
 tabs = pn.Tabs(('X', fig2Dx_pane), ('Y', fig2Dy_pane),('Z', fig2Dz_pane))
 
+
+#%% Create the main widgets for the app
+uploadFile = pn.widgets.FileInput(accept='.bvh', name='Upload a new BVH file') # Upload a new BVH file
+selectFile = pn.widgets.Select(name='Select file', 
+                               groups={'ERGD': ['S4P07R1', 'S4P07R2'], 'Silk weaving': ['SWMLS01G01R01', 'SWMLS01G01R02'], 
+                                       'Glassblowing': ['GBBSS01G03R01', 'GBBSS01G03R02'], 'Mastic cultivation': ['MCEAS02G01R01', 'MCEAS02G01R02'],
+                                       'Television Assembly': ['TVBS01P01R02', 'TVBS01P02R07', 'TVBS01P03R09', 'TV_S01P01R13'],
+                                       'Airplane Assembly': ['PLNS01P02R05', 'PLNS02P03R02'],
+                                       'Ganterie': ['Ganterie_example_1', 'Ganterie_example_2']}, value = 'S4P07R1') # Select the file to load from ready files
+
+button_file = pn.widgets.Button(name='Load MoCap file', button_type='primary') # Button to load the selected file
+
+selectAngle = pn.widgets.Select(name='Select Joint to Plot', options= joints_to_draw, value = joints_to_draw[0]) # Select the joint to plot
+selectAngleCoef = pn.widgets.Select(name='Select Joint Angle Axis:', options= ['X', 'Y', 'Z'], value = 'X') # Select the axis to plot the joint angle
+
+frame_slider = pn.widgets.EditableIntSlider(name='Frame', start=1, end=len(jpos)-offset_time, step=1, value=0) # Slider to select the frame to show 
+selectInterval = pn.widgets.Select(name='Select Interval', options= ['None', 'Confidence intervals'], value = 'None') # Select the intervals to show in the plots
+
+checkbox2D = pn.widgets.Checkbox(name='Show 2D Joint Angle Trajectories') # Shows the 2D plot
+checkbox3D = pn.widgets.Checkbox(name='Show 3D Joint Angle Trajectories') # Shows the 3D plot
+checkboxGOM = pn.widgets.Checkbox(name='Dexterity Analysis') # Shows the GOM card
+checkboxKinematics = pn.widgets.Checkbox(name='Kinematics') #Not implemented yet
+
+# This sliders is to indicate up to which frames to show the intervals, so not all are computed, only the ones close to the marker (current frame)
+int_range_slider = pn.widgets.IntRangeSlider(name='Interval Range',
+    start=-10, end=10, value=(0, 0), step=1)
+
+
+selectCompareFile = pn.widgets.Select(name='Select an Existing File', 
+                               groups={'ERGD': ['S4P07R1', 'S4P07R2'], 'Silk weaving': ['SWMLS01G01R01', 'SWMLS01G01R02'], 
+                                       'Glassblowing': ['GBBSS01G03R01', 'GBBSS01G03R02'], 'Mastic cultivation': ['MCEAS02G01R01', 'MCEAS02G01R02'],
+                                       'Television Assembly': ['TVBS01P01R02', 'TVBS01P02R07', 'TVBS01P03R09', 'TV_S01P01R13'],
+                                       'Airplane Assembly': ['PLNS01P02R05', 'PLNS02P03R02'],
+                                       'Ganterie': ['Ganterie_example_1', 'Ganterie_example_2']}, value = 'S4P07R1') # Select the file to compare
+
+inputCompareFile = pn.widgets.FileInput(accept='.bvh', name='Upload a new BVH file') # Upload a new BVH file to compare
+
+buttonRemoveCompare = pn.widgets.Button(name='Remove comparison', button_type='warning') # Button to remove the comparison
+buttonCompare = pn.widgets.Button(name='Compare', button_type='primary') # Button to compare the selected file
+
+# Create the widgets for the GOM card
+# This function is so only one toggle button can be selected at a time
+def sync_toggle_groups(event):
+    if event.new is not None:
+        if event.obj is toggle_Model1:
+            toggle_Model2.value = None
+        elif event.obj is toggle_Model2:
+            toggle_Model1.value = None
+
+# Create the toggle buttons for the different data-intesive models
+toggle_Model1 = pn.widgets.ToggleGroup(name='Data-intensive', options=['VAE-RGOM', 'ATT-RGOM', 'T-RGOM'], behavior="radio", value='ATT-RGOM', label='Data-intensive')
+toggle_Model1.param.watch(sync_toggle_groups, 'value') # Link the toggle buttons to the function
+
+# Create the toggle button for the one-shot model
+toggle_Model2 = pn.widgets.ToggleGroup(name='One-Shot', options=['KF-GOM'], behavior="radio", value=None, width=100, label='One-Shot')
+toggle_Model2.param.watch(sync_toggle_groups, 'value') # Link the toggle button to the function
+
+# Create the static text to show the selected model
+toggle_Model = pn.widgets.StaticText(value=toggle_Model1.value or toggle_Model2.value)
+
+# Function to update the selected model
+def update_selected_option(event):
+    if event.new is not None:
+        #print('Selected model:', event.new)
+        toggle_Model.value = event.new
+
+toggle_Model1.param.watch(update_selected_option, 'value')
+toggle_Model2.param.watch(update_selected_option, 'value')
+
+toggle_Model2.value = None
+
+# Visualization of the widgets on the GOM card
+toggle_Model_Widgets = pn.Row(
+    pn.Column(pn.pane.Markdown('### Data-intensive'), toggle_Model1, background='whitesmoke', width=320),
+    pn.Spacer(width=50),
+    pn.Column(pn.pane.Markdown('### One-Shot'), pn.Column(toggle_Model2, align='center'), background='whitesmoke', width=320))
+
+
+#%% Create the markers for the initial angle of the selected joint that is shown in the 2D plot (GOM card)
+# The markers are created every 45 frames, which can be modified by the user in the app
 initial_angle = eulerAngles[variables[0]].iloc[offset_time:]
 n = len(initial_angle.index) // 45
 x_marker = initial_angle.index[::n]
 y_marker = initial_angle.values[::n]
 
-# Add the first and last points of the sine curve to the markers
 x_marker = np.concatenate(([initial_angle.index[0]], x_marker, [initial_angle.index[-1]]))
 y_marker = np.concatenate(([initial_angle.values[0]], y_marker, [initial_angle.values[-1]]))
 
@@ -470,107 +564,36 @@ data_marker = ColumnDataSource({
 })
 
 p = figure(title=variables[0], x_axis_label='Frames', y_axis_label='Angle', plot_height=400)
-
 source = ColumnDataSource(data=dict(x=initial_angle.index, y=initial_angle.values))
 p.line('x', 'y', source=source, line_width=2, color='#D8BFD8')
-
 renderer = p.scatter(x='x', y='y', source=data_marker, color='#800080', size=10)
 p.line(x='x', y='y', source=data_marker, color='#800080')
 
-
-source_comp = ColumnDataSource(data=dict(x=[], y=[]))
-p.line('x', 'y', source=source_comp, line_width=2, color='black', line_dash='dashed')
-
-# Add the PointDrawTool to the scatter plot
 draw_tool = PointDrawTool(renderers=[renderer], empty_value='black')
 p.add_tools(draw_tool)
-# Add the BoxSelectTool and LassoSelectTool to the plot
 box_select = BoxSelectTool(renderers=[renderer])
 lasso_select = LassoSelectTool(renderers=[renderer])
 p.add_tools(box_select, lasso_select)
 plot_pane = pn.pane.Bokeh(p)
 
-checkbox_group = pn.widgets.Tabulator(df_joints, selection=list(df_joints.index), height=400, selectable='checkbox')
-save_button = pn.widgets.Button(name="Save Changes", button_type='primary', width=width_A_buttons)
-reset_Jbutton = pn.widgets.Button(name="Reset Angle Changes", button_type="warning", width=width_A_buttons)
-reset_Abutton = pn.widgets.Button(name="Reset All Changes", button_type="warning", width=width_A_buttons)
-accept_button = pn.widgets.Button(name="Accept Changes", button_type='primary', width=width_A_buttons)
-joint_angle_select = pn.widgets.Select(name='Joint Angle', options=variables, value = variables[0])
+
+# Create the markers for the comparison plot, to have ready for the comparison of the joint angles
+source_comp = ColumnDataSource(data=dict(x=[], y=[]))
+p.line('x', 'y', source=source_comp, line_width=2, color='black', line_dash='dashed')
 
 
+# Create all my widgets for modifying the joint angles
+checkbox_group = pn.widgets.Tabulator(df_joints, selection=list(df_joints.index), height=400, selectable='checkbox') # Table to select the joint angles to modify
+save_button = pn.widgets.Button(name="Save Changes", button_type='primary', width=width_A_buttons) # Button to save the changes
+reset_Jbutton = pn.widgets.Button(name="Reset Angle Changes", button_type="warning", width=width_A_buttons) # Button to reset the changes
+reset_Abutton = pn.widgets.Button(name="Reset All Changes", button_type="warning", width=width_A_buttons) # Button to reset all the changes
+accept_button = pn.widgets.Button(name="Accept Changes", button_type='primary', width=width_A_buttons) # Button to accept the changes
 
-#%%
-selectFile = pn.widgets.Select(name='Select file', 
-                               groups={'ERGD': ['S4P07R1', 'S4P07R2'], 'Silk weaving': ['SWMLS01G01R01', 'SWMLS01G01R02'], 
-                                       'Glassblowing': ['GBBSS01G03R01', 'GBBSS01G03R02'], 'Mastic cultivation': ['MCEAS02G01R01', 'MCEAS02G01R02'],
-                                       'Television Assembly': ['TVBS01P01R02', 'TVBS01P02R07', 'TVBS01P03R09', 'TV_S01P01R13'],
-                                       'Airplane Assembly': ['PLNS01P02R05', 'PLNS02P03R02']}, value = 'S4P07R1')
-
-selectAngle = pn.widgets.Select(name='Select Joint to Plot', options= joints_to_draw, value = joints_to_draw[0])
-selectAngleCoef = pn.widgets.Select(name='Select Joint Angle Axis:', options= ['X', 'Y', 'Z'], value = 'X')
-
-frame_slider = pn.widgets.EditableIntSlider(name='Frame', start=1, end=len(jpos)-offset_time, step=1, value=0)
-selectInterval = pn.widgets.Select(name='Select Interval', options= ['None', 'Confidence intervals'], value = 'None')
-
-int_range = pn.widgets.EditableIntSlider(name='Integer Slider', start=0, end=8, step=2, value=4)
-
-checkbox2D = pn.widgets.Checkbox(name='Show 2D Joint Angle Trajectories')
-checkbox3D = pn.widgets.Checkbox(name='Show 3D Joint Angle Trajectories')
-checkboxGOM = pn.widgets.Checkbox(name='Dexterity Analysis')
-checkboxKinematics = pn.widgets.Checkbox(name='Kinematics')
-
-int_range_slider = pn.widgets.IntRangeSlider(name='Interval Range',
-    start=-10, end=10, value=(0, 0), step=1)
-
-
-selectCompareFile = pn.widgets.Select(name='Select an Existing File', 
-                               groups={'ERGD': ['S4P07R1', 'S4P07R2'], 'Silk weaving': ['SWMLS01G01R01', 'SWMLS01G01R02'], 
-                                       'Glassblowing': ['GBBSS01G03R01', 'GBBSS01G03R02'], 'Mastic cultivation': ['MCEAS02G01R01', 'MCEAS02G01R02']}, value = 'S4P07R1')
-
-inputCompareFile = pn.widgets.FileInput(accept='.bvh', name='Upload a new BVH file')
-
-buttonRemoveCompare = pn.widgets.Button(name='Remove comparison', button_type='warning')
-buttonCompare = pn.widgets.Button(name='Compare', button_type='primary')
-#label_model = pn.pane.Markdown('#### Training Approach:')
-#toggle_Model = pn.widgets.ToggleGroup(name='Training Approach', options=['KF-GOM','ATT-RGOM', 'VAE-RGOM', 'T-RGOM'], behavior="radio", value='ATT-RGOM')
-
-
-def sync_toggle_groups(event):
-    if event.new is not None:
-        if event.obj is toggle_Model1:
-            toggle_Model2.value = None
-        elif event.obj is toggle_Model2:
-            toggle_Model1.value = None
-
-toggle_Model1 = pn.widgets.ToggleGroup(name='Data-intensive', options=['VAE-RGOM', 'ATT-RGOM', 'T-RGOM'], behavior="radio", value='ATT-RGOM', label='Data-intensive')
-toggle_Model1.param.watch(sync_toggle_groups, 'value')
-
-toggle_Model2 = pn.widgets.ToggleGroup(name='One-Shot', options=['KF-GOM'], behavior="radio", value=None, width=100, label='One-Shot')
-toggle_Model2.param.watch(sync_toggle_groups, 'value')
-
-toggle_Model = pn.widgets.StaticText(value=toggle_Model1.value or toggle_Model2.value)
-
-def update_selected_option(event):
-    if event.new is not None:
-        print('Selected model:', event.new)
-        toggle_Model.value = event.new
-
-toggle_Model1.param.watch(update_selected_option, 'value')
-toggle_Model2.param.watch(update_selected_option, 'value')
-
-
-toggle_Model2.value = None
-toggle_Model_Widgets = pn.Row(
-    pn.Column(pn.pane.Markdown('### Data-intensive'), toggle_Model1, background='whitesmoke', width=320),
-    pn.Spacer(width=50),
-    pn.Column(pn.pane.Markdown('### One-Shot'), pn.Column(toggle_Model2, align='center'), background='whitesmoke', width=320))
-
-
-
+#%% Function to update the 2D plots with the selected joint angle
 
 def update_angle(selectAngle):
     global offset_time, eulerAngles
-    print('Change Angle: ', selectAngle)
+    #print('Change Angle: ', selectAngle)
     dff_3d = eulerAngles[[selectAngle+'_Xrotation', selectAngle+'_Yrotation', selectAngle+'_Zrotation']]
 
     fig3D = go.Figure(layout=dict(width=690, height=450))
@@ -588,8 +611,8 @@ def update_angle(selectAngle):
         ))
     fig2Dx.add_trace(
         go.Scatter(
-            x=[0],  # Replace with the x-coordinate of the marker in the initial frame
-            y=[dff_3d.iloc[offset_time,0]],  # Replace with the y-coordinate of the marker in the initial frame
+            x=[0],  
+            y=[dff_3d.iloc[offset_time,0]],  
             mode='markers',
             showlegend=False,
             marker=dict(size=10, symbol="diamond-dot", color='rgba(255, 0, 0, 0.5)')
@@ -607,8 +630,8 @@ def update_angle(selectAngle):
         ))
     fig2Dy.add_trace(
         go.Scatter(
-            x=[0],  # Replace with the x-coordinate of the marker in the initial frame
-            y=[dff_3d.iloc[offset_time,1]],  # Replace with the y-coordinate of the marker in the initial frame
+            x=[0],  
+            y=[dff_3d.iloc[offset_time,1]],  
             mode='markers',
             showlegend=False,
             marker=dict(size=10, symbol="diamond-dot", color='rgba(0, 128, 0, 0.5)')
@@ -626,8 +649,8 @@ def update_angle(selectAngle):
         ))
     fig2Dz.add_trace(
         go.Scatter(
-            x=[0],  # Replace with the x-coordinate of the marker in the initial frame
-            y=[dff_3d.iloc[offset_time,2]],  # Replace with the y-coordinate of the marker in the initial frame
+            x=[0],  
+            y=[dff_3d.iloc[offset_time,2]],  
             mode='markers',
             showlegend=False,
             marker=dict(size=10, symbol="diamond-dot", color='rgba(0, 0, 255, 0.5)')
@@ -640,6 +663,7 @@ def update_angle(selectAngle):
     fig3D.add_trace(go.Scatter3d(x=[dff_3d.iloc[offset_time,0]], y=[dff_3d.iloc[offset_time,1]], z=[dff_3d.iloc[offset_time,2]], 
                                  mode='markers', showlegend=False, marker=dict(size=5, symbol='diamond')))
     
+    # Add the joint angle of the recording file that is compated
     if compare == True:
         dff_3d = eulerAngles_comp[[selectAngle+'_Xrotation', selectAngle+'_Yrotation', selectAngle+'_Zrotation']]
 
@@ -669,8 +693,8 @@ def update_angle(selectAngle):
             ))
         fig2Dy.add_trace(
             go.Scatter(
-                x=[0],  # Replace with the x-coordinate of the marker in the initial frame
-                y=[dff_3d.iloc[offset_time,1]],  # Replace with the y-coordinate of the marker in the initial frame
+                x=[0],  
+                y=[dff_3d.iloc[offset_time,1]],  
                 mode='markers',
                 showlegend=False,
                 marker=dict(size=10, symbol="diamond-dot", color='rgba(0, 128, 0, 0.5)')
@@ -685,8 +709,8 @@ def update_angle(selectAngle):
             ))
         fig2Dz.add_trace(
             go.Scatter(
-                x=[0],  # Replace with the x-coordinate of the marker in the initial frame
-                y=[dff_3d.iloc[offset_time,2]],  # Replace with the y-coordinate of the marker in the initial frame
+                x=[0],  
+                y=[dff_3d.iloc[offset_time,2]],  
                 mode='markers',
                 showlegend=False,
                 marker=dict(size=10, symbol="diamond-dot", color='rgba(0, 0, 255, 0.5)')
@@ -711,12 +735,12 @@ def update_angle(selectAngle):
 
 iupdate_angle= pn.bind(update_angle, selectAngle)
 
-
+# Function to show the selected interval range, and marker of the current frame
 def update_interval(selectInterval, frame, int_frame):
     global offset_time, eulerAngles, positions, GOM_Skel
-    print('Change: ', selectInterval)
-    print('Change: ', frame)
-    print('Range: ', int_frame)
+    #print('Change: ', selectInterval)
+    #print('Change: ', frame)
+    #print('Range: ', int_frame)
 
     fig3D = go.Figure(layout=dict(width=690, height=450))
     fig2Dx = go.Figure(layout=dict(width=690, height=450))
@@ -739,8 +763,8 @@ def update_interval(selectInterval, frame, int_frame):
         ))
     fig2Dx.add_trace(
         go.Scatter(
-            x=[frame],  # Replace with the x-coordinate of the marker in the initial frame
-            y=[dat_x[frame]],  # Replace with the y-coordinate of the marker in the initial frame
+            x=[frame],  
+            y=[dat_x[frame]], # Marker at the current frame
             mode='markers',
             showlegend=False,
             marker=dict(size=10, symbol="diamond-dot", color='rgba(255, 0, 0, 0.5)')
@@ -758,8 +782,8 @@ def update_interval(selectInterval, frame, int_frame):
         ))
     fig2Dy.add_trace(
         go.Scatter(
-            x=[frame],  # Replace with the x-coordinate of the marker in the initial frame
-            y=[dat_y[frame]],  # Replace with the y-coordinate of the marker in the initial frame
+            x=[frame], 
+            y=[dat_y[frame]],  
             mode='markers',
             showlegend=False,
             marker=dict(size=10, symbol="diamond-dot", color='rgba(0, 128, 0, 0.5)')
@@ -777,8 +801,8 @@ def update_interval(selectInterval, frame, int_frame):
         ))
     fig2Dz.add_trace(
         go.Scatter(
-            x=[frame],  # Replace with the x-coordinate of the marker in the initial frame
-            y=[dat_z[frame]],  # Replace with the y-coordinate of the marker in the initial frame
+            x=[frame],  
+            y=[dat_z[frame]],  
             mode='markers',
             showlegend=False,
             marker=dict(size=10, symbol="diamond-dot", color='rgba(0, 0, 255, 0.5)')
@@ -868,6 +892,9 @@ def update_interval(selectInterval, frame, int_frame):
                 showlegend=False
             ))
 
+        # Add the confidence intervals to the 3D plot 
+        # Ellipsoids are put here, but correct intervals should be implemented, confidence intervals are not good option for this
+        # Other intervals need to be implemented that are easy to calculate and show in the 3D plot
         radii = [ci_x, ci_y, ci_z]  
 
         n = len(jpos)-offset_time
@@ -891,7 +918,7 @@ def update_interval(selectInterval, frame, int_frame):
             z = radii[2] * np.outer(np.ones(np.size(phi)), np.cos(theta)) + center[2]
             fig3D.add_trace(go.Mesh3d(x=x.flatten(), y=y.flatten(), z=z.flatten(), opacity=0.2, color='rgba(200, 100, 200, 0.5)'))
     
-
+    # Add the joint angle of the recording file that is compated
     if compare == True:
         if frame >= len(eulerAngles_comp)-offset_time:
             frame = len(eulerAngles_comp)-offset_time-1
@@ -967,21 +994,20 @@ def update_interval(selectInterval, frame, int_frame):
 
 iupdate_interval= pn.bind(update_interval, selectInterval, frame_slider, int_range_slider)
 
+# Function to show range slider for the confidence intervals
 def show_intervSlider(select_value):
     if select_value == 'Confidence intervals':
         return int_range_slider
     else:
         return None
 
-
-def load_NewFile(file_name):
-    global parsed_data
-    print('Change File: ', file_name)
-    global eulerAngles, jpos, positions, i_angle, GOM_Skel, eulerAngles_original
-
-    path='bvh2/'+file_name+'.bvh'
-    parser = BVHParser()
-    parsed_data = parser.parse(path)
+# Function when a new file is loaded
+def load_NewFile(event):
+    global eulerAngles, jpos, positions, i_angle, GOM_Skel, eulerAngles_original, GOM_df, joints_to_draw
+    
+    checkboxGOM.value = False # Uncheck the GOM card
+    
+    # Load the new file and prepare all required data
     positions = mp.fit_transform([parsed_data])
     mocap_data = parsed_data.values.reset_index().iloc[:,1:]
     rot_cols = [col for col in mocap_data.columns if 'rotation' in col]
@@ -989,7 +1015,20 @@ def load_NewFile(file_name):
     eulerAngles_original = eulerAngles.copy()
 
     jpos = positions[0].values.iloc[1:,:].reset_index(drop=True)
-
+    joints_to_draw = list(positions[0].skeleton.keys())
+    GOM_df = pd.DataFrame(index=joints_to_draw, columns=joints_to_draw)
+    
+    for col in GOM_df.columns:
+        for idx in GOM_df.index:
+            if col == idx:
+                GOM_df.loc[idx, col] = 'red'  # Selected Joint
+            elif positions[0].skeleton[idx]['children'] is not None and col in positions[0].skeleton[idx]['children']:
+                GOM_df.loc[idx, col] = 'darkgreen'  # Serial Joint
+            elif positions[0].skeleton[idx]['parent'] is not None and col in positions[0].skeleton[idx]['parent']:
+                GOM_df.loc[idx, col] = 'darkgreen'  # Serial Joint
+            else:
+                GOM_df.loc[idx, col] = 'midnightblue'  # Non-Serial Joint
+    
     frame_slider.value = 1
     frame_slider.start = 1
     frame_slider.end = len(jpos) - offset_time
@@ -1008,7 +1047,7 @@ def load_NewFile(file_name):
     fig2Dy_LN = go.Figure(layout=dict(width=690, height=450))
     fig2Dz_LN= go.Figure(layout=dict(width=690, height=450))
 
-
+    # Update the 2D and 3D plots with the new data
     dff_3d = eulerAngles[[selectAngle.value+'_Xrotation', selectAngle.value+'_Yrotation', selectAngle.value+'_Zrotation']]
     
     fig2Dx_LN.add_trace(
@@ -1074,6 +1113,7 @@ def load_NewFile(file_name):
     fig3D_LN.add_trace(go.Scatter3d(x=[dff_3d.iloc[offset_time,0]], y=[dff_3d.iloc[offset_time,1]], z=[dff_3d.iloc[offset_time,2]], 
                                     mode='markers', showlegend=False, marker=dict(size=5, symbol='diamond')))
     
+    # Add the joint angle of the recording file that is compated
     if compare == True:
         dff_3d = eulerAngles_comp[[selectAngle.value+'_Xrotation', selectAngle.value+'_Yrotation', selectAngle.value+'_Zrotation']]
 
@@ -1141,29 +1181,34 @@ def load_NewFile(file_name):
     figA_pane.object = draw_stickfigure3d_js(positions[0], frame=0, highlight_joint = selectAngle.value, GOM_Skel=GOM_Skel, compare=compare)
     figA_pane.param.trigger('object')
 
-    if checkboxGOM.value:
-        global coef, pred, data_marker_changes, eulerAngles_GOM
-        data_marker_changes = {}
-        eulerAngles_GOM = []
-        #coef, pred = ae_gom.do_gom(eulerAngles)
-        if toggle_Model.value == 'ATT-RGOM':
-            coef, pred = ae_gom.do_gom(eulerAngles)
-            print('ATT-RGOM')
-        elif toggle_Model.value == 'VAE-RGOM':
-            coef, pred = vae_gom.do_gom(eulerAngles)
-            print('VAE-RGOM')
-        elif toggle_Model.value == 'T-RGOM': 
-            coef, pred = t_gom.do_gom(eulerAngles)
-            print('T-RGOM')
-        elif toggle_Model.value == 'KF-GOM': 
-            coef, pred = kf_gom.do_gom(eulerAngles)
-            print('KF-GOM')
-        selectAngleCoef.value = 'X'
-        selectAngleCoef.param.trigger('value')
+    # I removed the following code because the GOM card is not shown when a new file is loaded but the dexterity checkbox is checked 
+    # Need to correct
+    
+    # if checkboxGOM.value:
+    #     global coef, pred, data_marker_changes, eulerAngles_GOM
+        
+        
+    #     data_marker_changes = {}
+    #     eulerAngles_GOM = []
+    #     #coef, pred = ae_gom.do_gom(eulerAngles)
+    #     if toggle_Model.value == 'ATT-RGOM':
+    #         coef, pred = ae_gom.do_gom(eulerAngles)
+    #         #print('ATT-RGOM')
+    #     elif toggle_Model.value == 'VAE-RGOM':
+    #         coef, pred = vae_gom.do_gom(eulerAngles)
+    #         #print('VAE-RGOM')
+    #     elif toggle_Model.value == 'T-RGOM': 
+    #         coef, pred = t_gom.do_gom(eulerAngles)
+    #         #print('T-RGOM')
+    #     elif toggle_Model.value == 'KF-GOM': 
+    #         coef, pred = kf_gom.do_gom(eulerAngles)
+    #         #print('KF-GOM')
+    #     selectAngleCoef.value = 'X'
+    #     selectAngleCoef.param.trigger('value')
 
         
 
-
+# Function to show the GOM card when the dexterity analysis checkbox is checked
 def plot_iGOM(selectAngle, angMod, trained_model):
     global file_loaded, model_loaded, coef, pred, stats_figT, ae_gom
     global j_var, col_coef, offsetP, tabsC, col_stats, positionsPred, figA_pred_pane, download_Gdat_button
@@ -1175,36 +1220,36 @@ def plot_iGOM(selectAngle, angMod, trained_model):
     global plot_paneA1, plot_paneA2, plot_paneA3, plot_paneA41, plot_paneA42, fig_pred_pane, fig_pred_plot
     global kf_variables_A1, kf_variables_A2, kf_variables_A3, kf_variables_A41, kf_variables_A42, row_coef, dfPvalues
 
-
-    if file_loaded != selectFile.value:
-        file_loaded = selectFile.value
+    # Compute the prediction and coefficients according to the approach selected (I make sure to not recompute when the same file is loaded)
+    if file_loaded != file_name:
+        file_loaded = file_name
         if trained_model == 'ATT-RGOM':
             coef, pred = ae_gom.do_gom(eulerAngles)
-            print('ATT-RGOM')
+            #print('ATT-RGOM')
         elif trained_model == 'VAE-RGOM':
             coef, pred = vae_gom.do_gom(eulerAngles)
-            print('VAE-RGOM')
+            #print('VAE-RGOM')
         elif trained_model == 'T-RGOM': 
             coef, pred = t_gom.do_gom(eulerAngles)
-            print('T-RGOM')
+            #print('T-RGOM')
         elif trained_model == 'KF-GOM': 
             coef, pred = kf_gom.do_gom(eulerAngles)
-            print('KF-GOM')
-        print(file_loaded)
+            #print('KF-GOM')
+        #print(file_loaded)
     elif model_loaded != trained_model:
         model_loaded = trained_model
         if trained_model == 'ATT-RGOM':
             coef, pred = ae_gom.do_gom(eulerAngles)
-            print('ATT-RGOM')
+            #print('ATT-RGOM')
         elif trained_model == 'VAE-RGOM':
             coef, pred = vae_gom.do_gom(eulerAngles)
-            print('VAE-RGOM')
+            #print('VAE-RGOM')
         elif trained_model == 'T-RGOM': 
             coef, pred = t_gom.do_gom(eulerAngles)
-            print('T-RGOM')
+            #print('T-RGOM')
         elif trained_model == 'KF-GOM': 
             coef, pred = kf_gom.do_gom(eulerAngles)
-            print('KF-GOM')
+            #print('KF-GOM')
 
     index = variables.index(selectAngle+'_'+angMod+'rotation') #Select joint angle modeled
 
@@ -1219,7 +1264,7 @@ def plot_iGOM(selectAngle, angMod, trained_model):
         tab_stats = tab_stats.reset_index()
         tab_stats = tab_stats.rename(columns={'index': 'Joint Angle'})
         stats_figT = pn.widgets.Tabulator(tab_stats, height=300)
-        model_title = pn.Row(pn.pane.Markdown('### '+selectFile.value+': '+selectAngle+' '+angMod+'-axis'))
+        model_title = pn.Row(pn.pane.Markdown('### '+file_name+': '+selectAngle+' '+angMod+'-axis'))
     else:
         dfCoef = coef.iloc[:,index]
         dfPvalues = kf_gom.pvalues.iloc[:,index]
@@ -1228,15 +1273,22 @@ def plot_iGOM(selectAngle, angMod, trained_model):
         tab_stats = pd.concat([dfCoef, dfPvalues], axis=1)
         tab_stats.columns = ['Coefficients', 'P-values']
         stats_figT = pn.widgets.Tabulator(tab_stats, height=300)
-        model_title = pn.Row(pn.pane.Markdown('### '+selectFile.value+': '+selectAngle+' '+angMod+'-axis'))
+        model_title = pn.Row(pn.pane.Markdown('### '+file_name+': '+selectAngle+' '+angMod+'-axis'))
 
     # Global Statistics
+    # Only with KF-GOM the p-values are shown (the p-values are not shown for the other models as require all their iterations to compute)
     col_stats = pn.Column(
         model_title,
         stats_figT
     )
     
-
+    # The following code correspodns to the Bokeh plots for the coefficients of the different angles in the model
+    # The coefficients are arranged by tabs according to the assumption of the joint angle modeled
+    # For instances only limbs have synergy assumption, so for spine joints this tab is empty
+    
+    # Users can drag the points on the plots to modify the coefficients, and then save the changes to make an effect on the prediction
+    # Check the tools of the bokeh plot to interact with the plots
+    
     # Assumption 1: Time-dependent transition
     dfCoef_A1 = dfCoef.filter(regex=selectAngle+'_'+angMod+'rotation')
     if trained_model != 'KF-GOM':
@@ -1284,9 +1336,8 @@ def plot_iGOM(selectAngle, angMod, trained_model):
         reset_AbuttonA1.on_click(reset_changesA1)
         accept_buttonA1.on_click(accept_changesA1)
         accept_changesA1(event=None)
-    else: 
-        kf_variables_A1 = [KF_Variable(name=i, coef=dfCoef_A1[i]) for i in list(dfCoef_A1.index)]
-        # Create a Panel dashboard to display and edit the variables
+    else: # For KF-GOM the constant coefficients are shown as sliders
+        kf_variables_A1 = [KF_Variable(name=i, coef=dfCoef_A1[i], bounds=(0, dfCoef_A1[i]+10) if dfCoef_A1[i] >= 0 else (dfCoef_A1[i]-10, 0)) for i in list(dfCoef_A1.index)]
         dashboard_A1 = pn.Column(height=400, width=650)
 
         for i, var in enumerate(kf_variables_A1):
@@ -1298,7 +1349,6 @@ def plot_iGOM(selectAngle, angMod, trained_model):
                     align='center'
                 )
             )
-
 
         save_buttonA1 = pn.widgets.Button(name="Save Changes", button_type='primary', width=width_A_buttons)
         reset_AbuttonA1 = pn.widgets.Button(name="Reset All Changes", button_type="warning", width=width_A_buttons)
@@ -1361,17 +1411,14 @@ def plot_iGOM(selectAngle, angMod, trained_model):
         reset_AbuttonA2.on_click(reset_changesA2)
         accept_buttonA2.on_click(accept_changesA2)
         accept_changesA2(event=None)
-    else:
+    else: # For KF-GOM the constant coefficients are shown as sliders
         rows_to_drop = dfCoef_A2.filter(regex=angMod).index
         dfCoef_A2 = dfCoef_A2.drop(index=rows_to_drop)
-        kf_variables_A2 = [KF_Variable(name=i, coef=dfCoef_A2[i]) for i in list(dfCoef_A2.index)]
-        # Create a Panel dashboard to display and edit the variables
+        kf_variables_A2 = [KF_Variable(name=i, coef=dfCoef_A2[i], bounds=(0, dfCoef_A2[i]+10) if dfCoef_A2[i] >= 0 else (dfCoef_A2[i]-10, 0)) for i in list(dfCoef_A2.index)]   
         dashboard_A2 = pn.GridSpec(sizing_mode='stretch_both', max_height=300)
         dashboard_A2 = pn.Column(height=400, width=650)
 
         for i, var in enumerate(kf_variables_A2):
-            #col, row = divmod(i, 10)  # Arrange in ten rows
-            #dashboard[row, col] = pn.Row(pn.pane.Markdown(f'**{var.name}**', width=200), var.param.value, var.param.reset, sizing_mode='stretch_width')
             dashboard_A2.append(
                 pn.Row(
                     pn.pane.Markdown(f'**{var.name}**', width=200), 
@@ -1394,9 +1441,8 @@ def plot_iGOM(selectAngle, angMod, trained_model):
 
 
     # Assumption 3: Inter-limb synergies
-    if selectAngle not in nosynergy: 
+    if selectAngle not in nosynergy: # Only for joints with synergy assumption and arrange joint angles according if it is a right or left limb joint
         if selectAngle.startswith('Right'):
-            # Do something if selectAngle starts with 'Right'
             selectAngleC = selectAngle.replace('Right', 'Left')
         elif selectAngle.startswith('Left'):
             selectAngleC = selectAngle.replace('Left', 'Right')
@@ -1447,14 +1493,11 @@ def plot_iGOM(selectAngle, angMod, trained_model):
             reset_AbuttonA3.on_click(reset_changesA3)
             accept_buttonA3.on_click(accept_changesA3)
             accept_changesA3(event=None)
-        else:
-            kf_variables_A3 = [KF_Variable(name=i, coef=dfCoef_A3[i]) for i in list(dfCoef_A3.index)]
-            # Create a Panel dashboard to display and edit the variables
+        else: # For KF-GOM the constant coefficients are shown as sliders
+            kf_variables_A3 = [KF_Variable(name=i, coef=dfCoef_A3[i], bounds=(0, dfCoef_A3[i]+10) if dfCoef_A3[i] >= 0 else (dfCoef_A3[i]-10, 0)) for i in list(dfCoef_A3.index)]
             dashboard_A3 = pn.Column(height=400, width=650)
 
             for i, var in enumerate(kf_variables_A3):
-                #col, row = divmod(i, 10)  # Arrange in ten rows
-                #dashboard[row, col] = pn.Row(pn.pane.Markdown(f'**{var.name}**', width=200), var.param.value, var.param.reset, sizing_mode='stretch_width')
                 dashboard_A3.append(
                     pn.Row(
                         pn.pane.Markdown(f'**{var.name}**', width=200), 
@@ -1533,12 +1576,10 @@ def plot_iGOM(selectAngle, angMod, trained_model):
         reset_AbuttonA41.on_click(reset_changesA41)
         accept_buttonA41.on_click(accept_changesA41)
         accept_changesA41(event=None) 
-    else:
+    else: # For KF-GOM the constant coefficients are shown as sliders
         dfCoef_A41 = dfCoef[dfCoef.index[dfCoef.index.to_series().str.contains('|'.join(listA41))]]
-        kf_variables_A41 = [KF_Variable(name=i, coef=dfCoef_A41[i]) for i in list(dfCoef_A41.index)]
-        # Create a Panel dashboard to display and edit the variables
+        kf_variables_A41 = [KF_Variable(name=i, coef=dfCoef_A41[i], bounds=(0, dfCoef_A41[i]+10) if dfCoef_A41[i] >= 0 else (dfCoef_A41[i]-10, 0)) for i in list(dfCoef_A41.index)]
         dashboard_A41 = pn.Column(scroll = True, height=400, width=650)
-
 
         for i, var in enumerate(kf_variables_A41):
             dashboard_A41.append(
@@ -1608,16 +1649,13 @@ def plot_iGOM(selectAngle, angMod, trained_model):
         reset_AbuttonA42.on_click(reset_changesA42)
         accept_buttonA42.on_click(accept_changesA42)
         accept_changesA42(event=None) 
-    else:
+    else: # For KF-GOM the constant coefficients are shown as sliders
         listA42 = dfCoef_A1.index.tolist()+ dfCoef_A2.index.tolist() + dfCoef_A3.index.tolist()+ dfCoef_A41.index.tolist()
         dfCoef_A42 = dfCoef.drop(index=listA42)
-        kf_variables_A42 = [KF_Variable(name=i, coef=dfCoef_A42[i]) for i in list(dfCoef_A42.index)]
-        # Create a Panel dashboard to display and edit the variables
+        kf_variables_A42 = [KF_Variable(name=i, coef=dfCoef_A42[i], bounds=(0, dfCoef_A42[i]+10) if dfCoef_A42[i] >= 0 else (dfCoef_A42[i]-10, 0)) for i in list(dfCoef_A42.index)]
         dashboard_A42 = pn.Column(scroll = True, height=400, width=650)
 
         for i, var in enumerate(kf_variables_A42):
-            #col, row = divmod(i, 10)  # Arrange in ten rows
-            #dashboard[row, col] = pn.Row(pn.pane.Markdown(f'**{var.name}**', width=200), var.param.value, var.param.reset, sizing_mode='stretch_width')
             if var.name == 'Bias':
                 continue
             else:
@@ -1643,7 +1681,7 @@ def plot_iGOM(selectAngle, angMod, trained_model):
                     ('Serial intra-limb mediation', tabA41),('Non-serial intra-limb mediation', tabA42), 
                     ('All assumptions statistics', col_stats), height=400)
 
-
+    # Visualization of the main tab in the GOM card
     columnCard = pn.Column('## Training',
                            pn.layout.Divider(margin=(-20, 0, 0, 0)),
                            toggle_Model_Widgets, 
@@ -1656,7 +1694,7 @@ def plot_iGOM(selectAngle, angMod, trained_model):
                            width=1100, height=850)
     
 
-    #%% Prediction
+    #%% Generated movement tab in the GOM card
 
     fig_pred = go.Figure(
         layout=go.Layout(
@@ -1679,7 +1717,7 @@ def plot_iGOM(selectAngle, angMod, trained_model):
     fig_pred_plot = pn.pane.Plotly(fig_pred, align = 'center')
 
 
-    ## Plot predicted skeleton
+    ## Plot predicted skeleton with the trajectory of the modeled joint angle
     parsed_dataPred = parsed_data
     dfVal = parsed_dataPred.values
     nn = [dfVal.columns.get_loc(c) for c in pred.columns if c in dfVal]
@@ -1708,17 +1746,18 @@ def plot_iGOM(selectAngle, angMod, trained_model):
 
     figA_pred_pane = pn.pane.Plotly(fig_pred_skel)
 
+    # This predicted skeleton has it own slider to change the frame
     frame_slider_pred = pn.widgets.EditableIntSlider(name='Frame', start=1, end=len(pred)-offset_time, step=1, value=0)
     frame_slider_pred.param.watch(update_frame_pred, 'value')
 
+    # Visualization of the generated movement tab in the GOM card
     pred_skel_tools = pn.Column(figA_pred_pane, frame_slider_pred)
-
     fig_pred_pane = pn.Row(fig_pred_plot, pred_skel_tools)
 
-    accept_changes(event=None) # Load initial Euler Angles
-
-
     
+    # Run all initial visualization of the GOM card
+    accept_changes(event=None)
+
     if trained_model != 'KF-GOM':
         coef_i = pd.concat([coef_A1_GOM, coef_A2_GOM, coef_A3_GOM, coef_A41_GOM, coef_A42_GOM], axis=1)
         coef_init = coef_i[col_coef].reset_index(drop=True)
@@ -1749,16 +1788,20 @@ def plot_iGOM(selectAngle, angMod, trained_model):
 
     offsetP = pred_i - predOrg
 
+
     plot_selected_angle(event=None)
     
+    # Visualization of the GOM card:
     tabJA = pn.Row(checkbox_group, plot_pane, pn.Column(save_button, reset_Jbutton, reset_Abutton, accept_button), width=1100, height=600)
 
     tabsGOM = pn.Tabs(('Joint Angles', tabJA), ('Model', columnCard),('Generated Movement', fig_pred_pane), active=1)
 
+    # Whenever the user do changes in the Model or Joint Angles tab, he/she needs to press the Predict Joint Angle button 
+    # to see the changes in the Generated Movement tab
     predict_button = pn.widgets.Button(name="Predict Joint Angle", button_type='primary', width=width_A_buttons, align='center')
     predict_button.on_click(predict_angle)
 
-
+    # I added an extra button to download the generated data as a csv file
     sio = StringIO()
     pred_mod = pred_i
     pred_mod.to_csv(sio)
@@ -1767,15 +1810,16 @@ def plot_iGOM(selectAngle, angMod, trained_model):
 
     buttons_pred_dw = pn.Row(predict_button, download_Gdat_button)
 
-
+    # The final card of the GOM
     cardGOM = pn.Card(tabsGOM, buttons_pred_dw, title='Gesture Operational Model')
 
+    # If the user wants to compare coefficients, joint angles and precitions with a second recording, the following code is executed
     if compare == True:
         plot_iGOM_comp()
     
     return cardGOM
 
-
+# Function to plot the trajectories and skeleton of the generated movement tab from the GOM card
 def update_frame_pred(event):
     camA = figA_pred_pane.object.layout['scene']['camera']
     fig_pred_skel = draw_stickfigure3d_js(positionsPred[0], frame=event.new, cam = camA, highlight_joint = selectAngle.value, GOM_Skel=GOM_Skel)
@@ -1799,7 +1843,7 @@ def update_frame_pred(event):
     figA_pred_pane.object = fig_pred_skel
     figA_pred_pane.param.trigger('object')
 
-
+# Plot of the angle in the Joint Angles tab from the GOM card
 def plot_selected_angle(event):
     global jointA
     if event is None:
@@ -1824,6 +1868,10 @@ def plot_selected_angle(event):
         source_comp.data = dict(x=eulerAngles_comp.loc[offset_time:,jointA].index, y=eulerAngles_comp.loc[offset_time:,jointA].values)
 
 
+############################################################################################################
+# The following functions are used to update the data marker changes in the Joint Angle and Model tabs from the GOM card 
+# First are the functions forchanges in the Joint Angle tab and 
+# then the functions for changes in the Model tab (time-varying coefficients from A1, A2, A3, A41, A42)
 
 def update_data_marker_changes(attr, old, new):
     data_marker_changes[jointA] = {'x': new['x'], 'y': new['y']}
@@ -1833,12 +1881,12 @@ def save_changes(event):
         # Interpolate the changes to match the index of eulerAngles
         new_values = np.interp(eulerAngles.iloc[offset_time:,:].index, changes['x'], changes['y'])
         eulerAngles.loc[offset_time:,joint_angle] = pd.Series(index=eulerAngles.iloc[offset_time:,:].index, data=new_values)
-    print("Changes saved.")
+    #print("Changes saved.")
 
 def reset_changes(event):
     for joint_angle in data_marker_changes.keys():
         eulerAngles.loc[:,joint_angle] = eulerAngles_original[joint_angle]
-    print("Changes reset.")
+    #print("Changes reset.")
     
     # Clear the data_marker_changes dictionary
     data_marker_changes.clear()
@@ -1860,7 +1908,7 @@ def reset_changes(event):
 
 def reset_joint(event):
     eulerAngles.loc[:,jointA] = eulerAngles_original[jointA]
-    print(f"Changes to {jointA} reset.")
+    #print(f"Changes to {jointA} reset.")
     # Clear the data_marker_changes dictionary for the selected joint angle
     data_marker_changes.pop(jointA, None)
     # Reset the data_marker data source for the selected joint angle
@@ -1880,7 +1928,6 @@ def accept_changes(event):
     global eulerAngles_GOM
     # Get the selected joint angle
     eulerAngles_GOM = eulerAngles.copy()
-    #selected_joint_angle = joint_angle_select.value
 
     checked_angles = checkbox_group.selection
     checked_angles2 = [variables[row] for row in checked_angles]
@@ -1917,18 +1964,18 @@ def save_changesA1(event):
     for joint_angle, changes in data_marker_changesA1.items():
         new_values = np.interp(dfCoef_A1.iloc[offset_time:,:].index, changes['x'], changes['y'])
         dfCoef_A1.loc[offset_time:,joint_angle] = pd.Series(index=dfCoef_A1.iloc[offset_time:,:].index, data=new_values)
-    print("Changes A1 saved.")
+    #print("Changes A1 saved.")
 
 def save_changesA1_KF(event):
     slider_values = [var.value for var in kf_variables_A1]
     # Update dfCoef_A1 according to the slider values
     dfCoef_A1.iloc[:] = slider_values
-    print("Changes A1 saved.")
+    #print("Changes A1 saved.")
 
 def reset_changesA1(event):
     for joint_angle in data_marker_changesA1.keys():
         dfCoef_A1.loc[offset_time:,joint_angle] = dfCoef_A1_original.loc[offset_time:,joint_angle]
-    print("Changes A1 reset.")
+    #print("Changes A1 reset.")
     
     data_marker_changesA1.clear()
     initial_coef = dfCoef_A1[dfCoef_A1.columns.tolist()[0]].iloc[offset_time:]
@@ -1947,13 +1994,11 @@ def reset_changesA1(event):
 def reset_changesA1_KF(event):
     for var in kf_variables_A1:
         var._reset()
-
-    print("Changes A1 reset.")
-
+    #print("Changes A1 reset.")
 
 def reset_jointA1(event):
     dfCoef_A1.loc[offset_time:,angleA1] = dfCoef_A1_original[angleA1].iloc[offset_time:]
-    print(f"Changes to {angleA1} reset.")
+    #print(f"Changes to {angleA1} reset.")
     data_marker_changesA1.pop(angleA1, None)
     initial_angle = dfCoef_A1[angleA1].iloc[offset_time:]
     n = len(initial_angle.index) // 45
@@ -2006,18 +2051,18 @@ def save_changesA2(event):
     for joint_angle, changes in data_marker_changesA2.items():
         new_values = np.interp(dfCoef_A2.iloc[offset_time:,:].index, changes['x'], changes['y'])
         dfCoef_A2.loc[offset_time:,joint_angle] = pd.Series(index=dfCoef_A2.iloc[offset_time:,:].index, data=new_values)
-    print("Changes A2 saved.")
+    #print("Changes A2 saved.")
 
 def save_changesA2_KF(event):
     slider_values = [var.value for var in kf_variables_A2]
     # Update dfCoef_A1 according to the slider values
     dfCoef_A2[:] = slider_values
-    print("Changes A2 saved.")
+    #print("Changes A2 saved.")
 
 def reset_changesA2(event):
     for joint_angle in data_marker_changesA2.keys():
         dfCoef_A2.loc[offset_time:,joint_angle] = dfCoef_A2_original.loc[offset_time:,joint_angle]
-    print("Changes A2 reset.")
+    #print("Changes A2 reset.")
     
     data_marker_changesA2.clear()
     initial_coef = dfCoef_A2[dfCoef_A2.columns.tolist()[0]].iloc[offset_time:]
@@ -2035,11 +2080,11 @@ def reset_changesA2(event):
 def reset_changesA2_KF(event):
     for var in kf_variables_A2:
         var._reset()
-    print("Changes A2 reset.")
+    #print("Changes A2 reset.")
 
 def reset_jointA2(event):
     dfCoef_A2.loc[offset_time:,angleA2] = dfCoef_A2_original[angleA2].iloc[offset_time:]
-    print(f"Changes to {angleA2} reset.")
+    #print(f"Changes to {angleA2} reset.")
     data_marker_changesA2.pop(angleA2, None)
     initial_angle = dfCoef_A2[angleA2].iloc[offset_time:]
     n = len(initial_angle.index) // 45
@@ -2093,18 +2138,18 @@ def save_changesA3(event):
     for joint_angle, changes in data_marker_changesA3.items():
         new_values = np.interp(dfCoef_A3.iloc[offset_time:,:].index, changes['x'], changes['y'])
         dfCoef_A3.loc[offset_time:,joint_angle] = pd.Series(index=dfCoef_A3.iloc[offset_time:,:].index, data=new_values)
-    print("Changes A3 saved.")
+    #print("Changes A3 saved.")
 
 def save_changesA3_KF(event):
     slider_values = [var.value for var in kf_variables_A3]
     # Update dfCoef_A1 according to the slider values
     dfCoef_A3[:] = slider_values
-    print("Changes A3 saved.")
+    #print("Changes A3 saved.")
 
 def reset_changesA3(event):
     for joint_angle in data_marker_changesA3.keys():
         dfCoef_A3.loc[offset_time:,joint_angle] = dfCoef_A3_original.loc[offset_time:,joint_angle]
-    print("Changes A3 reset.")
+    #print("Changes A3 reset.")
     
     data_marker_changesA3.clear()
     initial_coef = dfCoef_A3[dfCoef_A3.columns.tolist()[0]].iloc[offset_time:]
@@ -2122,11 +2167,11 @@ def reset_changesA3(event):
 def reset_changesA3_KF(event):
     for var in kf_variables_A3:
         var._reset()
-    print("Changes A3 reset.")
+    #print("Changes A3 reset.")
 
 def reset_jointA3(event):
     dfCoef_A3.loc[offset_time:,angleA3] = dfCoef_A3_original[angleA3].iloc[offset_time:]
-    print(f"Changes to {angleA3} reset.")
+    #print(f"Changes to {angleA3} reset.")
     data_marker_changesA3.pop(angleA3, None)
     initial_angle = dfCoef_A3[angleA3].iloc[offset_time:]
     n = len(initial_angle.index) // 45
@@ -2180,18 +2225,18 @@ def save_changesA41(event):
     for joint_angle, changes in data_marker_changesA41.items():
         new_values = np.interp(dfCoef_A41.iloc[offset_time:,:].index, changes['x'], changes['y'])
         dfCoef_A41.loc[offset_time:,joint_angle] = pd.Series(index=dfCoef_A41.iloc[offset_time:,:].index, data=new_values)
-    print("Changes A41 saved.")
+    #print("Changes A41 saved.")
 
 def save_changesA41_KF(event):
     slider_values = [var.value for var in kf_variables_A41]
     # Update dfCoef_A1 according to the slider values
     dfCoef_A41[:] = slider_values
-    print("Changes A41 saved.")
+    #print("Changes A41 saved.")
 
 def reset_changesA41(event):
     for joint_angle in data_marker_changesA41.keys():
         dfCoef_A41.loc[offset_time:,joint_angle] = dfCoef_A41_original.loc[offset_time:,joint_angle]
-    print("Changes A41 reset.")
+    #print("Changes A41 reset.")
     
     data_marker_changesA41.clear()
     initial_coef = dfCoef_A41[dfCoef_A41.columns.tolist()[0]].iloc[offset_time:]
@@ -2209,11 +2254,11 @@ def reset_changesA41(event):
 def reset_changesA41_KF(event):
     for var in kf_variables_A41:
         var._reset()
-    print("Changes A41 reset.")
+    #print("Changes A41 reset.")
 
 def reset_jointA41(event):
     dfCoef_A41.loc[offset_time:,angleA41] = dfCoef_A41_original[angleA41].iloc[offset_time:]
-    print(f"Changes to {angleA41} reset.")
+    #print(f"Changes to {angleA41} reset.")
     data_marker_changesA41.pop(angleA41, None)
     initial_angle = dfCoef_A41[angleA41].iloc[offset_time:]
     n = len(initial_angle.index) // 45
@@ -2266,18 +2311,18 @@ def save_changesA42(event):
     for joint_angle, changes in data_marker_changesA42.items():
         new_values = np.interp(dfCoef_A42.iloc[offset_time:,:].index, changes['x'], changes['y'])
         dfCoef_A42.loc[offset_time:,joint_angle] = pd.Series(index=dfCoef_A42.iloc[offset_time:,:].index, data=new_values)
-    print("Changes A42 saved.")
+    #print("Changes A42 saved.")
 
 def save_changesA42_KF(event):
     slider_values = [var.value for var in kf_variables_A42]
     # Update dfCoef_A1 according to the slider values
     dfCoef_A42[:] = slider_values
-    print("Changes A42 saved.")
+    #print("Changes A42 saved.")
 
 def reset_changesA42(event):
     for joint_angle in data_marker_changesA42.keys():
         dfCoef_A42.loc[offset_time:,joint_angle] = dfCoef_A42_original.loc[offset_time:,joint_angle]
-    print("Changes A42 reset.")
+    #print("Changes A42 reset.")
     
     data_marker_changesA42.clear()
     initial_coef = dfCoef_A42[dfCoef_A42.columns.tolist()[0]].iloc[offset_time:]
@@ -2295,11 +2340,11 @@ def reset_changesA42(event):
 def reset_changesA42_KF(event):
     for var in kf_variables_A42:
         var._reset()
-    print("Changes A42 reset.")
+    #print("Changes A42 reset.")
 
 def reset_jointA42(event):
     dfCoef_A42.loc[offset_time:,angleA42] = dfCoef_A42_original[angleA42].iloc[offset_time:]
-    print(f"Changes to {angleA42} reset.")
+    #print(f"Changes to {angleA42} reset.")
     data_marker_changesA42.pop(angleA42, None)
     initial_angle = dfCoef_A42[angleA42].iloc[offset_time:]
     n = len(initial_angle.index) // 45
@@ -2324,9 +2369,12 @@ def accept_changesA42_KF(event):
     global coef_A42_GOM
     coef_A42_GOM = dfCoef_A42.copy()
 
+############################################################################################################
+# The following functions are used to predict the angles and update the plots and skeleton in the GOM card
+# We use the modified coefficients and joint angles to generate the skeleton poses and trajectory
 def predict_angle(event):
     global pred_mod, positionsPred, download_Gdat_button
-    print('Predicting angles...')
+    #print('Predicting angles...')
 
     if toggle_Model.value != 'KF-GOM':
         coef_A = pd.concat([coef_A1_GOM, coef_A2_GOM, coef_A3_GOM, coef_A41_GOM, coef_A42_GOM], axis=1)
@@ -2345,7 +2393,6 @@ def predict_angle(event):
         coef_mod = coef.copy()
         coef_mod.loc[:, selectAngle.value+'_'+selectAngleCoef.value+'rotation'] = coef_iA
 
-    #pred_mod =  vae_gom.pred_ang_coef(eulerAngles_GOM, coef_mod)
     if toggle_Model.value == 'ATT-RGOM':
         pred_mod =  ae_gom.pred_ang_coef(eulerAngles_GOM, coef_mod)
     elif toggle_Model.value == 'VAE-RGOM':
@@ -2389,7 +2436,6 @@ def predict_angle(event):
     fig_pred_plot.object = fig_pred
 
     # Update skeleton and trajectory
-
     parsed_dataPred = parsed_data
     dfVal = parsed_dataPred.values
     nn = [dfVal.columns.get_loc(c) for c in pred_mod.columns if c in dfVal]
@@ -2425,17 +2471,17 @@ def predict_angle(event):
         tab_stats = tab_stats.reset_index()
         tab_stats = tab_stats.rename(columns={'index': 'Joint Angle'})
         stats_figT.value = tab_stats
-        print('Updated plot and table')
+        #print('Updated plot and table')
     else:
         tab_stats = pd.concat([coef_iA, dfPvalues], axis=1)
         tab_stats.columns = ['Coefficients', 'P-values']
         stats_figT.value = tab_stats
 
 
-
+# Functions for the checkbox of dexterity analysis, according if it is checked or not
 def show_cardGOM(checkbox_value, selectAngle_value, angMod_value, toggle_value):
     global variablesOpt, GOM_Skel
-    if checkbox_value:
+    if checkbox_value:                
         selectAngle.options = variablesOpt
         GOM_Skel = True
         camA = figA_pane.object.layout['scene']['camera']
@@ -2447,16 +2493,35 @@ def show_cardGOM(checkbox_value, selectAngle_value, angMod_value, toggle_value):
         GOM_Skel = False
         return None
 
+# The following to functions are used to load a new file and update the parsed data (either use ready files or upload a new one)
+def select_InitialFile(event):
+    global parsed_data, file_name
+    file_name = event.new + '.bvh'
+    pathComp='bvh2/'+event.new+'.bvh'
+    parser = BVHParser()
+    parsed_data = parser.parse(pathComp)
+    
+def upload_InitialFile(event):
+    global parsed_data, file_name
+    file_name = uploadFile.filename 
+    parser = BVHParser()
+    parsed_data = parser.parse_input(event.new)
 
-iload_file= pn.bind(load_NewFile, selectFile)
+selectFile.param.watch(select_InitialFile, 'value')
+uploadFile.param.watch(upload_InitialFile, 'value')
+button_file.on_click(load_NewFile)
+
+# We connect our functions to the widgets
 icallGOM = pn.bind(show_cardGOM, checkbox_value=checkboxGOM, selectAngle_value=selectAngle, angMod_value=selectAngleCoef, toggle_value=toggle_Model)
 
-
+# Visualization of our 2D and 3D plots with their widgets (initial main plots)
 card2D = pn.Card(tabs, title='2D trajectory', height=560)
 centered_fig3D = pn.layout.Column(fig3D_pane, pn.bind(show_intervSlider, select_value=selectInterval), align='center')
 card3D = pn.Card(centered_fig3D, title='3D trajectory', height=560)
 
-
+############################################################################################################
+# Functions for comparison with a second file
+# The following function is to get the results of GOM on a second comparison file and update the plots and statistics
 def plot_iGOM_comp():
     global dfCoef_A1_comp, dfCoef_A2_comp, dfCoef_A3_comp, dfCoef_A41_comp, dfCoef_A42_comp
     global tabsC, sourceA1_comp, sourceA2_comp, sourceA3_comp, sourceA41_comp, sourceA42_comp
@@ -2464,17 +2529,17 @@ def plot_iGOM_comp():
     source_comp.data = dict(x=eulerAngles_comp.loc[offset_time:,variables[0]].index, y=eulerAngles_comp.loc[offset_time:,variables[0]].values)
 
     if toggle_Model.value == 'ATT-RGOM':
-            coef_comp, pred_comp = ae_gom.do_gom(eulerAngles_comp)
-            print('ATT-RGOM')
+        coef_comp, pred_comp = ae_gom.do_gom(eulerAngles_comp)
+        #print('ATT-RGOM')
     elif toggle_Model.value == 'VAE-RGOM':
         coef_comp, pred_comp = vae_gom.do_gom(eulerAngles_comp)
-        print('VAE-RGOM')
+        #print('VAE-RGOM')
     elif toggle_Model.value == 'T-RGOM': 
         coef_comp, pred_comp = t_gom.do_gom(eulerAngles_comp)
-        print('T-RGOM')
+        #print('T-RGOM')
     elif toggle_Model.value == 'KF-GOM': 
         coef_comp, pred_comp = kf_gom.do_gom(eulerAngles_comp)
-        print('KF-GOM')
+        #print('KF-GOM')
 
     index = variables.index(selectAngle.value+'_'+selectAngleCoef.value+'rotation') #Select joint angle modeled
     
@@ -2601,9 +2666,7 @@ def plot_iGOM_comp():
     fig_pred_skel.update_layout(autosize=False, width=400, height=400)
     figA_pred_pane.object = fig_pred_skel
     
-
-
-
+# Function to load a new file for comparison
 def load_NewCompareFile(event):
     global compare, eulerAngles_comp, jpos_comp, positions_comp
     compare = True
@@ -2694,7 +2757,8 @@ def load_NewCompareFile(event):
         plot_iGOM_comp()
 
 
-# Define the callback functions
+
+# Functions to select and upload a new file for comparison
 def select_Comparefile(event):
     if event.new:
         inputCompareFile.disabled = True
@@ -2707,7 +2771,6 @@ def select_Comparefile(event):
     else:
         inputCompareFile.disabled = False
     
-
 def upload_Comparefile(event):
     if event.new:
         selectCompareFile.disabled = True
@@ -2718,9 +2781,9 @@ def upload_Comparefile(event):
     else:
         selectCompareFile.disabled = False
 
-
 buttonCompare.on_click(load_NewCompareFile)
 
+# Function to remove the comparison with a second file
 def remove_comparison(event):
     global compare
     compare = False
@@ -2731,8 +2794,6 @@ def remove_comparison(event):
     fig2Dx = go.Figure(layout=dict(width=690, height=450))
     fig2Dy = go.Figure(layout=dict(width=690, height=450))
     fig2Dz= go.Figure(layout=dict(width=690, height=450))
-
-
 
     dff_3d = eulerAngles[[selectAngle.value+'_Xrotation', selectAngle.value+'_Yrotation', selectAngle.value+'_Zrotation']]
 
@@ -2847,13 +2908,11 @@ def remove_comparison(event):
 
 buttonRemoveCompare.on_click(remove_comparison)
 
-
-
-
 # Add the callback functions to the widgets
 selectCompareFile.param.watch(select_Comparefile, 'value')
 inputCompareFile.param.watch(upload_Comparefile, 'value')
 
+# Visualization of the widgets to load a second file for comparison in the side bar
 file_Compare_selection = pn.Column("#### Load Second Recording for Comparison:",
                                    pn.layout.Divider(margin=(-30, 0, 0, 0)),
                                    "Choose File from Repository or Load New File:",
@@ -2862,9 +2921,9 @@ file_Compare_selection = pn.Column("#### Load Second Recording for Comparison:",
                                    buttonCompare, 
                                    buttonRemoveCompare)
 
+############################################################################################################
 
-
-
+# Callback functions for the widgets in the side bar
 def show_card2D(checkbox_value):
     return card2D if checkbox_value else None
 
@@ -2879,12 +2938,14 @@ reset_Abutton.on_click(reset_changes)
 accept_button.on_click(accept_changes)
 
 # Instantiate the template with widgets displayed in the sidebar
-
 app = pn.template.MaterialTemplate(
     title='AImove',
     sidebar=["#### Load MoCap Recording",
              pn.layout.Divider(margin=(-30, 0, 0, 0)),
+             "Select File from Repository or Load New File:",
              selectFile,
+             uploadFile,
+             button_file,
              "#### Visualization Controls",
              pn.layout.Divider(margin=(-30, 0, 0, 0)),
              selectAngle,
@@ -2899,7 +2960,7 @@ app = pn.template.MaterialTemplate(
              checkboxKinematics,
              "#### Load Second Recording for Comparison:",
              pn.layout.Divider(margin=(-30, 0, 0, 0)),
-             "Choose File from Repository or Load New File:",
+             "Select File from Repository or Load New File:",
              selectCompareFile,
              inputCompareFile,
              buttonCompare, 
@@ -2908,7 +2969,7 @@ app = pn.template.MaterialTemplate(
     logo='Logo-Banner-A2-1.png'
 )
 
-
+# Add the main plots, widgets, and functions to the app
 app.main.append(
     pn.Row(
         pn.Column(
@@ -2920,10 +2981,8 @@ app.main.append(
         pn.Column(icallGOM),
         iupdate_angle,
         iupdate_interval,
-        iload_file,
     )
 )
 
 
-# %%
-app.show()# Set the camera position of the 3D plot
+app.show()

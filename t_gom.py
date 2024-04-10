@@ -5,6 +5,8 @@ import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 
+# Transformer for full-body GOM - Use trained network
+
 model_T = keras.models.load_model("Transformer_GOM_Coef")
 
 variables =  ['Spine_Xrotation','Spine_Yrotation','Spine_Zrotation','Spine1_Xrotation','Spine1_Yrotation','Spine1_Zrotation','Spine2_Xrotation','Spine2_Yrotation','Spine2_Zrotation',
@@ -43,6 +45,7 @@ for j in varSub:
     v = [ j +'_'+ sub for sub in coef_labels]
     varCoef = varCoef+ v
 
+# Create a class for the Transformer GOM model
 class TGom:
     def __init__(self, variables, varCoef, model_T):
         self.variables = variables
@@ -55,6 +58,7 @@ class TGom:
         self.df_pred = None
         self.df_yT = None
 
+    # This is the product of the coefficients and the input data
     def hadamard_product(self, x):
         coeff = keras.backend.expand_dims(x[0], axis=0)
         inp = keras.backend.expand_dims(x[1], axis=1)
@@ -63,6 +67,7 @@ class TGom:
         y = keras.backend.expand_dims(m2, axis=-2)
         return y
 
+    # Function to predict with the given coefficients
     def pred_ang_coef(self, dat_mod, coef_mod):
         val = dat_mod[self.variables].values  
         ned = self.scaler.transform(val)
@@ -97,14 +102,17 @@ class TGom:
         offset = df_yT.iloc[0,:] - df_y.iloc[0,:]
         df_p_mod = df_p_mod - offset
 
-        return df_p_mod
+        return df_p_mod # Return the predicted values
 
+    # Function to obtain time-varing coefficients and predicted values
     def do_gom(self, eulerAngles):
-        val = eulerAngles[self.variables].values  #DATAFRAME WITH ANGLES   
+        val = eulerAngles[self.variables].values  # Dataframe with angles
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
         self.scaler = self.scaler.fit(val)
         ned = self.scaler.transform(val)
-            
+        
+        # The data feed to the network is a 3-step window (dataX: 3x57) and predicts the next step (d1_pred: 1x57)
+        # The network gives the coefficients of the full-body GOM model 57x3x57    
         wx = []
         wy = []
         for w in np.arange(0,len(val)-3, 1):
@@ -146,7 +154,7 @@ class TGom:
             c_ae = pd.DataFrame(rc2[np.newaxis,:], columns=self.varCoef)
             coef_mat_tr = pd.concat([coef_mat_tr, c_ae], axis = 0) 
 
-        return coef_mat_tr, self.df_pred
+        return coef_mat_tr, self.df_pred # Return the coefficients and predicted values as dataframes
     
 
     
